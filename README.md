@@ -71,9 +71,14 @@ A Workspace admin adds it once so it appears for everyone:
 | `prepare_reply` | Stage a reply / reply-all to an email |
 | `prepare_forward` | Stage a forward to new recipients |
 | `send_email` | Send a staged email (requires a confirmation token) |
-| `update_email` | Mark read/unread, flag, archive, spam |
-| `move_email` | Move to a folder |
-| `apply_label` | Add or remove labels |
+| `update_email` | Mark read/unread, flag, archive, spam (one or many) |
+| `move_email` | Move to a folder (one or many) |
+| `apply_label` | Add or remove labels (one or many) |
+| `delete_emails` | Move one or many emails to Trash (recoverable) |
+| `create_folder` | Create a new mail folder |
+| `create_label` | Create a new label/tag |
+
+Bulk: `update_email`, `move_email`, `apply_label`, and `delete_emails` take a list of message IDs, so a search → act flow can process many at once. Scheduled send: pass `sendAt` (+ optional `timeZone`) to `prepare_email` to queue a message for later.
 
 Every tool defaults to the signed-in user's primary account, so the model rarely needs an account ID up front.
 

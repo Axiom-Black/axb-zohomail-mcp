@@ -18,6 +18,8 @@ export interface PendingSend {
   bccAddress?: string;
   inReplyTo?: string;
   attachments?: { fileName: string; contentBase64: string }[];
+  sendAt?: string;
+  timeZone?: string;
   createdAt: number;
 }
 
@@ -277,6 +279,7 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
       p.ccAddress ? `Cc: ${p.ccAddress}` : null,
       p.bccAddress ? `Bcc: ${p.bccAddress}` : null,
       `Subject: ${p.subject}`,
+      p.sendAt ? `Scheduled: ${p.sendAt} (${p.timeZone ?? "America/New_York"})` : null,
       p.attachments?.length ? `Attachments: ${p.attachments.map((a) => a.fileName).join(", ")}` : null,
       "",
       p.content,
@@ -298,6 +301,8 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
       ccAddress: z.string().optional(),
       bccAddress: z.string().optional(),
       attachments: attachmentsSchema,
+      sendAt: z.string().optional().describe("Schedule for this local date-time, e.g. '2026-07-10 09:00'. Omit to send immediately."),
+      timeZone: z.string().optional().describe("IANA timezone for sendAt (default America/New_York)"),
     },
     async (a) => {
       const { preview } = stage({
@@ -309,6 +314,8 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
         ccAddress: a.ccAddress,
         bccAddress: a.bccAddress,
         attachments: a.attachments,
+        sendAt: a.sendAt,
+        timeZone: a.timeZone,
       });
       return { content: [{ type: "text" as const, text: preview }] };
     },
@@ -412,6 +419,13 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
       if (p.bccAddress) payload.bccAddress = p.bccAddress;
       if (p.inReplyTo) payload.inReplyTo = p.inReplyTo;
 
+      if (p.sendAt) {
+        payload.isSchedule = true;
+        payload.scheduleType = 6; // custom date/time
+        payload.timeZone = p.timeZone ?? "America/New_York";
+        payload.scheduleTime = formatScheduleTime(p.sendAt);
+      }
+
       if (p.attachments?.length) {
         payload.attachments = await Promise.all(
           p.attachments.map((f) =>
@@ -422,10 +436,11 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
 
       const res = await client.post<any>(`/api/accounts/${p.accountId}/messages`, payload);
       pending.delete(confirmationToken);
+      const when = p.sendAt ? `Scheduled for ${p.sendAt} (${p.timeZone ?? "America/New_York"})` : "Sent";
       return {
         content: [{
           type: "text" as const,
-          text: `✅ Email sent.\nTo: ${p.toAddress}\nSubject: ${p.subject}\nMessage ID: ${res.data?.messageId}`,
+          text: `✅ ${when}.\nTo: ${p.toAddress}\nSubject: ${p.subject}\nMessage ID: ${res.data?.messageId}`,
         }],
       };
     },
@@ -443,62 +458,142 @@ export function registerTools(server: McpServer, client: ZohoClient, ctx: ToolCo
     markAsNotSpam: { mode: "spam", isSpam: false },
   };
 
+  const messageIds = z
+    .array(z.string())
+    .min(1)
+    .describe("One or more message IDs. Pass several for a bulk action.");
+
   server.tool(
     "update_email",
-    "Update email status — mark read/unread, flag, archive, or mark as spam.",
+    "Mark one or more emails read/unread, flag, archive, or mark as spam. Pass several IDs to act in bulk.",
     {
       accountId: acct,
-      messageId: z.string(),
+      messageIds,
       action: z.enum([
         "markAsRead", "markAsUnread", "flag", "unflag",
         "archive", "unarchive", "markAsSpam", "markAsNotSpam",
       ]),
     },
-    async ({ accountId, messageId, action }) => {
+    async ({ accountId, messageIds, action }) => {
       await client.put(`/api/accounts/${accountId}/updatemessage`, {
-        messageId: [messageId],
+        messageId: messageIds,
         ...actionMap[action],
       });
-      return json({ messageId, action, status: "Updated successfully" });
+      return json({ count: messageIds.length, action, status: "Updated successfully" });
     },
   );
 
   server.tool(
     "move_email",
-    "Move an email to a different folder.",
+    "Move one or more emails to a different folder. Pass several IDs to move in bulk.",
     {
       accountId: acct,
-      messageId: z.string(),
+      messageIds,
       destinationFolderId: z.string().describe("Target folder ID from list_folders"),
     },
-    async ({ accountId, messageId, destinationFolderId }) => {
+    async ({ accountId, messageIds, destinationFolderId }) => {
       await client.put(`/api/accounts/${accountId}/updatemessage`, {
-        messageId: [messageId],
+        messageId: messageIds,
         mode: "moveMessage",
         destfolderId: destinationFolderId,
       });
-      return json({ messageId, destinationFolderId, status: "Moved successfully" });
+      return json({ count: messageIds.length, destinationFolderId, status: "Moved successfully" });
     },
   );
 
   server.tool(
     "apply_label",
-    "Apply or remove a label/tag on an email.",
+    "Apply or remove a label/tag on one or more emails. Pass several IDs to label in bulk.",
     {
       accountId: acct,
-      messageId: z.string(),
+      messageIds,
       labelId: z.string(),
       remove: z.boolean().default(false).describe("true to remove the label instead of adding it"),
     },
-    async ({ accountId, messageId, labelId, remove }) => {
+    async ({ accountId, messageIds, labelId, remove }) => {
       await client.put(`/api/accounts/${accountId}/updatemessage`, {
-        messageId: [messageId],
+        messageId: messageIds,
         mode: remove ? "removeLabel" : "addLabel",
         labelid: [labelId],
       });
-      return json({ messageId, labelId, action: remove ? "removed" : "applied", status: "OK" });
+      return json({ count: messageIds.length, labelId, action: remove ? "removed" : "applied", status: "OK" });
     },
   );
+
+  server.tool(
+    "delete_emails",
+    "Move one or more emails to Trash (recoverable — this does not permanently delete).",
+    {
+      accountId: acct,
+      messageIds,
+      trashFolderId: z.string().optional().describe("Trash folder ID; auto-detected if omitted"),
+    },
+    async ({ accountId, messageIds, trashFolderId }) => {
+      let trash = trashFolderId;
+      if (!trash) {
+        const res = await client.get<any>(`/api/accounts/${accountId}/folders`);
+        const f = (res.data ?? []).find((x: any) => /^trash$/i.test(x.folderName));
+        if (!f) throw new Error("Couldn't find a Trash folder — pass trashFolderId explicitly.");
+        trash = f.folderId;
+      }
+      await client.put(`/api/accounts/${accountId}/updatemessage`, {
+        messageId: messageIds,
+        mode: "moveMessage",
+        destfolderId: trash,
+      });
+      return json({ count: messageIds.length, status: "Moved to Trash (recoverable)" });
+    },
+  );
+
+  // ── Folders & labels ──
+  server.tool(
+    "create_folder",
+    "Create a new mail folder, optionally nested under a parent.",
+    {
+      accountId: acct,
+      folderName: z.string().describe("Name of the new folder"),
+      parentFolderId: z.string().optional().describe("Parent folder ID to nest under"),
+    },
+    async ({ accountId, folderName, parentFolderId }) => {
+      const body: Record<string, unknown> = { folderName };
+      if (parentFolderId) body.parentFolderId = parentFolderId;
+      const res = await client.post<any>(`/api/accounts/${accountId}/folders`, body);
+      return json({
+        folderId: res.data?.folderId,
+        folderName: res.data?.folderName ?? folderName,
+        status: "Folder created",
+      });
+    },
+  );
+
+  server.tool(
+    "create_label",
+    "Create a new label/tag that can then be applied with apply_label.",
+    {
+      accountId: acct,
+      displayName: z.string().describe("Label name"),
+      color: z.string().optional().describe("Hex color like #2da44e (defaults to Zoho gold)"),
+    },
+    async ({ accountId, displayName, color }) => {
+      const body: Record<string, unknown> = { displayName };
+      if (color) body.color = color;
+      const res = await client.post<any>(`/api/accounts/${accountId}/labels`, body);
+      return json({
+        labelId: res.data?.labelId,
+        displayName: res.data?.displayName ?? displayName,
+        color: res.data?.color,
+        status: "Label created",
+      });
+    },
+  );
+}
+
+/** Convert a 'YYYY-MM-DD HH:MM[:SS]' (or ISO) string to Zoho's MM/DD/YYYY HH:MM:SS. */
+function formatScheduleTime(sendAt: string): string {
+  const m = sendAt.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) throw new Error(`Could not parse sendAt "${sendAt}". Use e.g. "2026-07-10 09:00".`);
+  const [, y, mo, d, h, mi, s] = m;
+  return `${mo}/${d}/${y} ${h}:${mi}:${s ?? "00"}`;
 }
 
 // ── helpers ──
