@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env, Props } from "./types.js";
 import { ZohoClient } from "./zoho/client.js";
 import { refreshZohoToken } from "./zoho/oauth.js";
-import { registerTools } from "./tools.js";
+import { registerTools, type PendingSend } from "./tools.js";
 
 /**
  * One Durable Object instance per authenticated MCP session. The user's Zoho
@@ -15,6 +15,9 @@ export class ZohoMailMCP extends McpAgent<Env, unknown, Props> {
   server = new McpServer({ name: "zoho-mail-mcp", version: "2.0.0" });
 
   private cached?: { token: string; expiresAt: number };
+
+  /** Prepared-but-unsent emails, keyed by confirmation token (per session). */
+  private pending = new Map<string, PendingSend>();
 
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
@@ -43,6 +46,10 @@ export class ZohoMailMCP extends McpAgent<Env, unknown, Props> {
       () => this.getAccessToken(),
       this.props.apiBase,
     );
-    registerTools(this.server, client, this.props.accountId);
+    registerTools(this.server, client, {
+      accountId: this.props.accountId,
+      userEmail: this.props.email,
+      pending: this.pending,
+    });
   }
 }

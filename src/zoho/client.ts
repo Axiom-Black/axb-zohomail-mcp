@@ -47,4 +47,56 @@ export class ZohoClient {
   put<T = any>(path: string, body?: unknown) {
     return this.request<T>("PUT", path, { body });
   }
+
+  /** Download raw attachment bytes (Zoho returns an octet stream). */
+  async getBinary(path: string): Promise<{ buffer: ArrayBuffer; contentType: string }> {
+    const token = await this.getToken();
+    const res = await fetch(`${this.apiBase}${path}`, {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        Accept: "application/octet-stream",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Zoho API error: HTTP ${res.status} downloading attachment`);
+    }
+    return {
+      buffer: await res.arrayBuffer(),
+      contentType: res.headers.get("content-type") ?? "application/octet-stream",
+    };
+  }
+
+  /**
+   * Upload one attachment (raw-file method) and return the reference fields
+   * Zoho expects back in a send request's `attachments` array.
+   */
+  async uploadAttachment(
+    accountId: string,
+    fileName: string,
+    bytes: Uint8Array,
+  ): Promise<{ storeName: string; attachmentName: string; attachmentPath: string }> {
+    const token = await this.getToken();
+    const url = new URL(`${this.apiBase}/api/accounts/${accountId}/messages/attachments`);
+    url.searchParams.set("fileName", fileName);
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${token}`,
+        "Content-Type": "application/octet-stream",
+      },
+      body: bytes,
+    });
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!res.ok) {
+      const msg = data?.data?.errorMessage || data?.message || `HTTP ${res.status}`;
+      throw new Error(`Zoho attachment upload failed: ${msg}`);
+    }
+    const d = data.data ?? {};
+    return {
+      storeName: d.storeName,
+      attachmentName: d.attachmentName ?? fileName,
+      attachmentPath: d.attachmentPath,
+    };
+  }
 }

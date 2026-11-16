@@ -61,18 +61,23 @@ A Workspace admin adds it once so it appears for everyone:
 | `get_accounts` | List the user's Zoho account IDs |
 | `list_folders` | List all folders |
 | `list_emails` | List emails in a folder |
-| `search_emails` | Search by keyword or sender |
+| `search_emails` | Search with filters: keyword, from, to, subject, has-attachment |
 | `get_email` | Read full email content |
 | `list_threads` | Get a conversation thread |
 | `get_attachment_info` | List attachments on an email |
-| `get_attachment` | Get attachment metadata |
-| `save_draft` | Save to Drafts folder |
-| `send_email` | Send with explicit user confirmation |
+| `get_attachment` | Download attachment contents (text / image / base64) |
+| `save_draft` | Save to Drafts folder for manual review |
+| `prepare_email` | Stage a new email → returns preview + confirmation token |
+| `prepare_reply` | Stage a reply / reply-all to an email |
+| `prepare_forward` | Stage a forward to new recipients |
+| `send_email` | Send a staged email (requires a confirmation token) |
 | `update_email` | Mark read/unread, flag, archive, spam |
 | `move_email` | Move to a folder |
 | `apply_label` | Add or remove labels |
 
 Every tool defaults to the signed-in user's primary account, so the model rarely needs an account ID up front.
+
+Composing uses a **two-step gate**: `prepare_*` returns a preview and a short-lived `confirmationToken`; nothing is sent until `send_email` is called with that token. Attachments can be passed to `prepare_email`/`prepare_reply` as base64 and are uploaded to Zoho at send time.
 
 ---
 
@@ -82,7 +87,7 @@ Every tool defaults to the signed-in user's primary account, so the model rarely
 - **Secret isolation** — the Zoho client secret is a Cloudflare secret, never distributed.
 - **Encrypted token storage** — grants live in Workers KV, encrypted at rest.
 - **Minimum scopes** — messages, folders, tags, and read-only account info. No org-admin.
-- **Send guardrail** — `send_email` is documented to require an explicit preview + confirmation before firing.
+- **Send guardrail** — a hard two-step gate: `send_email` only accepts a `confirmationToken` minted by a `prepare_*` tool, which expires after 15 minutes. No single call can send unreviewed mail.
 - **Central revocation** — drop a grant in KV, or revoke the app in [Zoho Connected Apps](https://accounts.zoho.com/home#connectedapps).
 
 ---
